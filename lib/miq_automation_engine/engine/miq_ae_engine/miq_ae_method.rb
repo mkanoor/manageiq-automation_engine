@@ -7,8 +7,29 @@ module MiqAeEngine
     end
 
     def self.invoke_inline(aem, obj, inputs)
+      return invoke_go(aem, obj, inputs) if inputs && inputs["runtime"] == "go"
+      return invoke_container(aem, obj, inputs) if inputs && inputs["runtime"] == "container"
       return invoke_inline_ruby(aem, obj, inputs) if aem.language.downcase.strip == "ruby"
       raise  MiqAeException::InvalidMethod, "Inline Method Language [#{aem.language}] not supported"
+    end
+
+    def self.invoke_go(aem, obj, inputs)
+      aw  = AutomateWorkspace.create(:input  => serialize_workspace(obj, inputs),
+                                     :user   => obj.workspace.ae_user,
+                                     :tenant => obj.workspace.ae_user.current_tenant)
+      params = {"--guid=" => aw.guid}
+      $miq_ae_logger.info("Starting Go Method #{params}")
+      ActiveRecord::Base.connection_pool.release_connection
+      x = AwesomeSpawn.run(inputs["exename"], :params => params)
+      $miq_ae_logger.info("Go Method Ended#{x}")
+      aw.reload
+      update_workspace(obj, aw.output)
+    end
+
+    def self.invoke_container(aem, obj, inputs)
+      bodies, script_info = bodies_and_line_numbers(obj, aem)
+      method = MiqAeEngine::MiqAeContainer.new(aem, obj, inputs, bodies, script_info)
+      method.run
     end
 
     def self.invoke_expression(aem, obj, inputs)
@@ -255,5 +276,24 @@ module MiqAeEngine
       return parts.pop, parts.pop, parts.join('/')
     end
     private_class_method :embedded_method_name
+
+    def self.serialize_workspace(obj, inputs)
+      {'workspace'         => obj.workspace.hash_workspace,
+       'method_parameters' => MiqAeReference.encode(inputs),
+       'current'           => current_info(obj.workspace),
+       'state_vars'        => MiqAeReference.encode(obj.workspace.persist_state_hash)}
+    end
+    private_class_method :serialize_workspace
+
+    def self.update_workspace(obj, data)
+      obj.workspace.update_workspace(data) 
+    end
+    private_class_method :update_workspace
+
+    def self.current_info(workspace)
+      list = %w(namespace class instance message method)
+      list.each.with_object({}) { |m, hash| hash[m] = workspace.send("current_#{m}".to_sym) }
+    end
+    private_class_method :current_info
   end
 end
